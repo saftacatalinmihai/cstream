@@ -9,7 +9,6 @@
 #include <unistd.h>
 #include <time.h>
 #include <string.h>
-#include <math.h>
 
 typedef int8_t  i8;
 typedef int16_t i16;
@@ -24,14 +23,10 @@ typedef uint64_t u64;
 bool debug = false;
 /* bool debug = true; */
 
-// /Arena\
-
 typedef struct Arena {
     char* memory;
     u64 size;
     u64 offset;
-    u64 total_accesses;        // For heat map
-    u64 start_timestamp;       // For timing
 } Arena;
 
 void* Arena_alloc_with_type(Arena* arena, u64 size, char* custom_name);
@@ -44,8 +39,6 @@ Arena* Arena_create(u64 size) {
     arena->memory = malloc(size);
     arena->size = size;
     arena->offset = 0;
-    arena->total_accesses = 0;
-    arena->start_timestamp = time(NULL);
     return arena;
 }
 
@@ -55,9 +48,9 @@ void* Arena_alloc(Arena* arena, u64 size) {
 
 void* Arena_alloc_with_type(Arena* arena, u64 size, char* custom_name) {
     if (arena->offset + size > arena->size) {
-        return NULL; // Not enough memory
+        return NULL;
     }
-    
+
     void* ptr = arena->memory + arena->offset;
     arena->offset += size;
     return ptr;
@@ -68,11 +61,9 @@ void Arena_reset(Arena* arena) {
 }
 
 void Arena_destroy(Arena* arena) {
-    // Clean up allocation tracking
     free(arena->memory);
     free(arena);
 }
-
 
 void Arena_print_memory(Arena* arena) {
     for (u64 i = 0; i < arena->offset; i++) {
@@ -81,7 +72,6 @@ void Arena_print_memory(Arena* arena) {
     printf("\n");
 }
 
-// \Arena/ 
 typedef struct ComponentPort { // A ring buffer for data
     char* buffer;
     u64 head;
@@ -122,7 +112,7 @@ struct Component {
     u64 control_size;
     u32 parallelism_level;
     pthread_t *threads;
-    Arena *arena;  // Add reference to arena for access tracking
+    Arena *arena;
 };
 
 void* Component_run_thread(void* args);
@@ -264,11 +254,7 @@ void* process_control(Component *comp, void* control_data) {
     return NULL;
 }
 
-#define MB (1024 * 1024)
-#define GB (1024 * 1024 * 1024)
-
 #define NUM_COMPS 8
-
 
 int main () {
     Arena *arena = Arena_create(1024 * 1024 * 1024);
@@ -276,7 +262,6 @@ int main () {
     struct timespec start, t1, t2, t3, end;
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-
 
     Component *comps[NUM_COMPS] = {0};
     char names[NUM_COMPS][4] = {0};
@@ -374,7 +359,7 @@ int main () {
 
 bool ring_buffer_add(ComponentPort* rb, char* data, u64 len) {
     if (rb->full) {
-        return false; // Buffer is full
+        return false;
     }
 
     if (len > rb->max - rb->head) {
@@ -435,7 +420,6 @@ bool Port_push(ComponentPort* rb, char* data, u64 len) {
     }
     bool result = ring_buffer_add(rb, data, len);
     if (result) { pthread_cond_signal(rb->cond_empty); }
-    /* pthread_cond_signal(rb->cond); */
     pthread_mutex_unlock(rb->mutex);
     /* printf("push 3\n"); */
     if (!result) { 
