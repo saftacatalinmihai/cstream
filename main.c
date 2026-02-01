@@ -238,10 +238,10 @@ void* process_i64(Component *comp, Message** message) {
     if ((i64)msg->data == -1) {
         printf("-1\n");
     }
-    usleep(100);
-     if (debug) printf("[Component: %s, threadID: %lu] Got Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(*(Message*)msg).data);
+    /* usleep(100); */
+     if (debug) printf("[Component: %s, threadID: %lu] Got Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
 
-    i64 new_value = *(i64*)(*(Message*)msg).data + 1000;
+    i64 new_value = *(i64*)(msg->data) + 1000;
     *(i64*)(msg->data) = new_value;
 
     /* Port_push(comp->data_out[0], (char*)msg, sizeof(Message)); */
@@ -254,7 +254,7 @@ void* consume_i64(Component *comp, Message** message) {
     Message *msg = *message;
 
     ComponentPort *wait_port = comp->extra_data;
-    if (debug)  printf("[Component: %s, threadID: %lu] Consumed Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(*(Message*)msg).data);
+    if (debug)  printf("[Component: %s, threadID: %lu] Consumed Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
     b8 done = true;
     Port_push(wait_port, &done, sizeof(b8));
     return NULL;
@@ -267,7 +267,7 @@ void* process_control(Component *comp, void* control_data) {
 }
 
 #define NUM_COMPS 4
-#define NUM_DATA 100042
+#define NUM_DATA 1000042
 
 int main () {
     Arena *arena = Arena_create(1024 * 1024 * 1024);
