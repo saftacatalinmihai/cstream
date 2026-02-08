@@ -5,7 +5,7 @@ compile_commands.json: Makefile
 	bear -- make main
 
 run: main
-	time ./main
+	./main
 
 clean:
 	rm -f main compile_commands.json

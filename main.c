@@ -374,8 +374,8 @@ int main () {
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
-    Message msg[NUM_DATA] = {0};
-    i64 data[NUM_DATA] = {0};
+    Message *msg = calloc(NUM_DATA, sizeof(Message));
+    i64 *data = calloc(NUM_DATA, sizeof(i64));
 
     printf("Pushing data: Bytes: %lu\n", NUM_DATA * sizeof(Message));
     u32 done_received = 0;
@@ -383,7 +383,7 @@ int main () {
 
     for (i64 i = 0; i < NUM_DATA; ++i) {
         data[i] = i + 1;
-        strcpy(&msg[i].msgTypeName, "i64");
+        strcpy(msg[i].msgTypeName, "i64");
         msg[i].msgType = MSG_TYPE_DATA;
         msg[i].data = data + i;
         void* ptr = msg + i;
@@ -443,7 +443,7 @@ int main () {
     printf("Total duration: %lf seconds\n", (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    i64 data2[NUM_DATA];
+    i64 *data2 = calloc(NUM_DATA, sizeof(i64));
     for (i64 i = 0; i < NUM_DATA; ++i) {
         data2[i] = i;
         if (data2[2] == -1) {
@@ -455,6 +455,10 @@ int main () {
 
     printf("Direct data generation duration: %lf seconds\n", 
            (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9);
+
+    free(msg);
+    free(data);
+    free(data2);
 
     return 0;
 }
