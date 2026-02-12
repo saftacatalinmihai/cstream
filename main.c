@@ -21,8 +21,11 @@ typedef uint64_t u64;
 
 typedef u8 b8;
 
-b8 debug = false;
-/* b8 debug = true; */
+#define MAX_PORTS 10
+#define MAX_FN_POINTERS 10
+
+/* #define DEBUG false */
+#define DEBUG true
 
 typedef struct Arena {
     char* memory;
@@ -100,13 +103,13 @@ ComponentPort * Port_create(Arena *arena, u16 data_size) {
 typedef struct Component Component;
 struct Component {
     char* name;
-    ComponentPort *data_in[10];
-    ComponentPort *data_out[10];
+    ComponentPort *data_in[MAX_PORTS];
+    ComponentPort *data_out[MAX_PORTS];
     ComponentPort *control_in;
-    void * (*data_fn_pointer[10])(Component*, void*);
+    void * (*data_fn_pointer[MAX_PORTS][MAX_FN_POINTERS])(Component*, void*);
     void * (*control_fn_pointer)(Component*, void*);
-    u64 data_in_size[10];
-    u64 data_out_size[10];
+    u64 data_in_size[MAX_PORTS];
+    u64 data_out_size[MAX_PORTS];
     u64 control_size;
     u32 parallelism_level;
     pthread_t *threads;
@@ -174,12 +177,22 @@ Component* Component_Flow(
     
     comp->data_in[0] = Port_create(arena, data_in_size);
     comp->data_in_size[0] = data_in_size;
-    comp->data_fn_pointer[0] = (void*)data_fn_pointer;
+    comp->data_fn_pointer[0][0] = (void*)data_fn_pointer;
     
     comp->data_out[0] = Port_create(arena, data_out_size);
     comp->data_out_size[0] = data_out_size;
 
     return comp;
+}
+
+Component* Component_Flow_Map(Component *comp, u8 port_idx, void * (*data_fn_pointer)(Component*, void*))  {
+    for (int i = 1; i < MAX_FN_POINTERS; ++i) {
+        if (comp->data_fn_pointer[port_idx][i] != NULL) { continue; }
+        comp->data_fn_pointer[port_idx][i] = (void*)data_fn_pointer;
+        return comp;
+    }
+    fprintf(stderr, "Error: Maximum number of ports reached for component %s.\n", comp->name);
+    return NULL;
 }
 
 Component* Component_Sink(
@@ -196,7 +209,7 @@ Component* Component_Sink(
     
     comp->data_in[0] = Port_create(arena, data_in_size);;
     comp->data_in_size[0] = data_in_size;
-    comp->data_fn_pointer[0] = (void*)data_fn_pointer;
+    comp->data_fn_pointer[0][0] = (void*)data_fn_pointer;
 
     return comp;
 }
@@ -215,8 +228,8 @@ void Component_push_control(Component* component, void *data, u64 len) {
 }
 
 typedef enum MsgType {
+    MSG_TYPE_DATA = 0,
     MSG_TYPE_SIGNAL,
-    MSG_TYPE_DATA,
 } MsgType;
 
 typedef enum SignalType {
@@ -240,14 +253,14 @@ void* process_i64(Component *comp, Message** message) {
         printf("-1\n");
     }
     usleep(100);
-     if (debug) printf("[Component: %s, threadID: %lu] Got Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
+     if (DEBUG) printf("[Component: %s, threadID: %lu] Got Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
 
     i64 new_value = *(i64*)(msg->data) + 1000;
     *(i64*)(msg->data) = new_value;
 
     /* Port_push(comp->data_out[0], (char*)msg, sizeof(Message)); */
     Port_data_out_push(comp, 0, &msg, sizeof(Message*));
-    if (debug)  printf("[Component: %s, threadID: %lu] Produced Value: %lld\n", comp->name, (unsigned long)pthread_self(), new_value);
+    if (DEBUG)  printf("[Component: %s, threadID: %lu] Produced Value: %lld\n", comp->name, (unsigned long)pthread_self(), new_value);
     return NULL;
 }
 
@@ -255,7 +268,7 @@ void* consume_i64(Component *comp, Message** message) {
     Message *msg = *message;
 
     ComponentPort *wait_port = comp->extra_data;
-    if (debug)  printf("[Component: %s, threadID: %lu] Consumed Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
+    if (DEBUG)  printf("[Component: %s, threadID: %lu] Consumed Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
     b8 done = true;
     Port_push(wait_port, &done, sizeof(b8));
     return NULL;
@@ -277,60 +290,104 @@ typedef struct DomainMessage {
     char str1[32];
 } DomainMessage;
 
-void* process_domain_message(Component *comp, Message* msg) {
-    DomainMessage *dm = msg->data;
-    dm->i2 = dm->i1 + 1000;
+void* process_message_c1(Component *comp, Message** msg) {
+    DomainMessage *dm = (*msg)->data;
+    dm->i2 = dm->i1 + 1;
+    dm->i1 = dm->i1 + 1000;
 
-    printf("Domain Message processed: i1=%lld, i2=%lld\n", dm->i1, dm->i2);
-    return (void*)true;
-    /* b8* ret = malloc(sizeof(b8)); */
-    /* return (void*)ret; */
+    printf("C1 Domain Message processed: i1=%lld, i2=%lld\n", dm->i1, dm->i2);
+    return msg;
 }
 
-int main () {
-    Arena *arena = Arena_create(1024 * 1024 * 1024);
-
-    // New
-    Component *c1 = COMP_FLOW(Message, b8, b8, "CD1", arena,
-        (void *)process_domain_message,
+Component* C1(Arena *arena) {
+    return COMP_FLOW(Message*, Message*, b8, "CD1", arena,
+        (void *)process_message_c1,
         (void *)process_control,
         4,
         NULL);
+}
+
+void* process_message_c2(Component *comp, Message** msg) {
+    DomainMessage *dm = (*msg)->data;
+    dm->b1 = dm->i1 % 2 == 0;
+
+    printf("C2 Domain Message processed: i1=%lld, b1=%d\n", dm->i1, dm->b1);
+    return msg;
+}
+
+Component* C2(Arena *arena) {
+    Component* c = 
+     COMP_FLOW(Message*, Message*, b8, "CD2", arena,
+        (void *)process_message_c2,
+        (void *)process_control,
+        4,
+        NULL);
+    Component_Flow_Map(c, 0, (void*)process_message_c1);
+    Component_Flow_Map(c, 0, (void*)process_message_c1);
+    Component_Flow_Map(c, 0, (void*)process_message_c1);
+    Component_Flow_Map(c, 0, (void*)process_message_c1);
+    return c;
+}
+
+void* process_message_c3(Component *comp, Message** msg) {
+    DomainMessage *dm =(*msg)->data;
+    snprintf(dm->str1, sizeof(dm->str1), "Str Value: %lld", dm->i1);
+
+    printf("C3 Domain Message processed: i1=%lld, str1=%s\n", dm->i1, dm->str1);
+    return msg;
+}
+
+Component* C3(Arena *arena) {
+    return COMP_FLOW(Message*, Message*, b8, "CD3", arena,
+        (void *)process_message_c3,
+        (void *)process_control,
+        4,
+        NULL);
+}
+
+int main() {
+    Arena *arena = Arena_create(1024 * 1024 * 1024);
+
+    Component *c1 = C1(arena);
+    Component *c2 = C2(arena);
+    Component *c3 = C3(arena);
     Component_start(c1);
+    Component_start(c2);
+    Component_start(c3);
 
-    DomainMessage dm1 = {0};
-    dm1.i1 = 42;
-    Message m1 = {0};
-    m1.msgType = MSG_TYPE_DATA;
-    m1.data = &dm1;
-    Port_push(c1->data_in[0], &m1, sizeof(Message));
+    c2->data_in[0] = c1->data_out[0];
+    c3->data_in[0] = c2->data_out[0];
 
-    DomainMessage dm2 = {0};
-    dm2.i1 = 1042;
-    Message m2 = {0};
-    m2.msgType = MSG_TYPE_DATA;
-    m2.data = &dm2;
-    Port_push(c1->data_in[0], &m2, sizeof(Message));
+    DomainMessage dm1 = {.i1 = 42};
+    Message m1 = {.data = &dm1};
+    void* m1_ptr = &m1;
+    Port_push(c1->data_in[0], &m1_ptr, sizeof(Message*));
 
-    DomainMessage dm3 = {0};
-    dm3.i1 = 1044;
-    Message m3 = {0};
-    m3.msgType = MSG_TYPE_DATA;
-    m3.data = &dm3;
-    Port_push(c1->data_in[0], &m3, sizeof(Message));
+    DomainMessage dm2 = {.i1 = 43};
+    Message m2 = {.data = &dm2};
+    void* m2_ptr = &m2;
+    Port_push(c1->data_in[0], &m2_ptr, sizeof(Message*));
+
+    DomainMessage dm3 = {.i1 = 44};
+    Message m3 = {.data = &dm3};
+    void* m3_ptr = &m3;
+    Port_push(c1->data_in[0], &m3_ptr, sizeof(Message*));
 
     int i = 0;
     while(i < 3) {
-        b8 ret;
-        u64 out_bytes = Port_pull(c1->data_out[0], &ret, sizeof(b8));
+        Message* ret;
+        u64 out_bytes = Port_pull(c3->data_out[0], &ret, sizeof(Message*));
         if (out_bytes > 0) {
             printf("Done\n");
+            printf("Final Domain Message: i1=%lld, i2=%lld, b1=%d, str1=%s\n", ((DomainMessage*)ret->data)->i1, ((DomainMessage*)ret->data)->i2, ((DomainMessage*)ret->data)->b1, ((DomainMessage*)ret->data)->str1);
             i++;
         } else {
-            sleep(1);
+            if (DEBUG) printf("No output yet...\n");
+            usleep(20000);
         }
     }
-    return 0;
+    printf("Domain message processing test done.\n");
+    getchar();
 
     // Prev
     struct timespec start, t1, t2, t3, end;
@@ -389,25 +446,25 @@ int main () {
         void* ptr = msg + i;
         Port_push(comps[0]->data_in[0], &ptr, sizeof(Message*));
         u64 received = Port_pull(wait_port, &done, sizeof(b8));
-        if (debug) printf("Wait received %llu bytes\n", received);
+        if (DEBUG) printf("Wait received %llu bytes\n", received);
         if (received > 0) {
             done_received += received / sizeof(b8);
-            if (debug) printf("Received done signal. Total done: %u/%u\n", done_received, NUM_DATA);
+            if (DEBUG) printf("Received done signal. Total done: %u/%u\n", done_received, NUM_DATA);
         }
 
         /* Port_data_out_push(comps[0], 0, (void*)&msgCtx[i], sizeof(Message)); */
         /* if (debug) printf("Pushed %lu size\n", sizeof(msgCtx[i])); */
-        if (debug) printf("Pushed %lld, %lu size\n", *(i64*)((Message*)(msg[i]).data), sizeof(Message*));
+        if (DEBUG) printf("Pushed %lld, %lu size\n", *(i64*)((Message*)(msg[i]).data), sizeof(Message*));
     }
 
 
     printf("Waiting for all data to be processed...\n");
     while (done_received < NUM_DATA) {
         u64 received = Port_pull(wait_port, (void*)&done, sizeof(b8));
-        if (debug) printf("Wait received %llu bytes\n", received);
+        if (DEBUG) printf("Wait received %llu bytes\n", received);
         if (received > 0) {
             done_received += received / sizeof(b8);
-            if (debug) printf("Received done signal. Total done: %u/%u\n", done_received, NUM_DATA);
+            if (DEBUG) printf("Received done signal. Total done: %u/%u\n", done_received, NUM_DATA);
         }
     }
 
@@ -523,7 +580,7 @@ b8 Port_push(ComponentPort* port, void* data, u64 len) {
     pthread_mutex_lock(port->mutex);
     /* printf("push 2\n"); */
     while (port->full) {
-        if (debug) printf("Push wait: Port Full (Backpressure - If you see program stuck with this message, it means there is data pushed to a port that is not consumed by any other component.)\n");
+        if (DEBUG) printf("Push wait: Port Full (Backpressure - If you see program stuck with this message, it means there is data pushed to a port that is not consumed by any other component.)\n");
         pthread_cond_wait(port->cond_not_full, port->mutex);
     }
     b8 result = ring_buffer_add(port, data, len);
@@ -544,7 +601,7 @@ b8 Port_data_out_push(Component *comp, u8 port_idx, void* data, u64 len) {
     pthread_mutex_lock(port->mutex);
     /* printf("push 2\n"); */
     while (port->full) {
-        if (debug) printf("[Component: %s, threadID: %lu] Push wait: Port Full (Backpressure - If you see program stuck with this message, it means there is data pushed to a port that is not consumed by any other component.)\n", comp->name, (unsigned long)pthread_self());
+        if (DEBUG) printf("[Component: %s, threadID: %lu] Push wait: Port Full (Backpressure - If you see program stuck with this message, it means there is data pushed to a port that is not consumed by any other component.)\n", comp->name, (unsigned long)pthread_self());
         pthread_cond_wait(port->cond_not_full, port->mutex);
     }
     b8 result = ring_buffer_add(port, data, len);
@@ -572,7 +629,7 @@ u64 Port_pull(ComponentPort* rb, void* data, u64 len_requested_in_bytes) {
 
 void* Component_run_thread(void* args) {
     Component *comp = args;
-    void* (*process_data)(Component*, void*) = comp->data_fn_pointer[0];
+    void* (**process_data)(Component*, void*) = comp->data_fn_pointer[0];
     printf("[Component: %s, threadID: %lu] Started\n", comp->name, (unsigned long)pthread_self());
 
     /* char* control_data = Arena_alloc(comp->arena, comp->control_size); */
@@ -582,21 +639,32 @@ void* Component_run_thread(void* args) {
         /* u64 len = Port_pull(comp->data_in[0], (char*)data, 0); // Will consume in this thread all existing msgs in buffer in order */
         u64 len = Port_pull(comp->data_in[0], data, comp->data_in_size[0]); // Will only take 1 msg from buffer if exists.
         if (len > 0) {
-            if (debug) printf("[Component: %s, threadID: %lu] Pulled %lld bytes\n", comp->name, (unsigned long)pthread_self(), len);
+            if (DEBUG) printf("[Component: %s, threadID: %lu] Pulled %lld bytes\n", comp->name, (unsigned long)pthread_self(), len);
 
             /* for( u64 i = 0; i <= ceil((len / comp->data_in_size[0]) / comp->parallelism_level); ++i) { */
             for( u64 i = 0; i < len / comp->data_in_size[0]; ++i) {
-                if (debug) printf("[Component: %s, threadID: %lu] Processing idx %lld\n", comp->name, (unsigned long)pthread_self(), i);
-                void* ret = process_data(comp, data + (i * comp->data_in_size[0]));
-                if (ret != NULL) {
-                    Port_data_out_push(comp, 0, &ret, comp->data_out_size[0]);
+                if (DEBUG) printf("[Component: %s, threadID: %lu] Processing idx %lld\n", comp->name, (unsigned long)pthread_self(), i);
+
+                int i = 0;
+                if (process_data[i] == NULL) { break; }
+                void* ret = process_data[i](comp, data + (i * comp->data_in_size[0]));
+                while (ret != NULL && i < MAX_FN_POINTERS) {
+                    if (process_data[i+1] == NULL) {
+                        if (DEBUG) printf("[Component: %s, threadID: %lu] Processing done, pushing to output...\n", comp->name, (unsigned long)pthread_self());
+                        Port_data_out_push(comp, 0, ret, comp->data_out_size[0]);
+                        break;
+                    } else {
+                        ret = process_data[i+1](comp, ret);
+                        i++;
+                    }
                 }
+                
             }
         }
         else {
             len = Port_pull(comp->control_in, control_data, comp->control_size);
             if (len > 0) {
-                if (debug) printf("[Component: %s, threadID: %lu] Processing control data...\n", comp->name, (unsigned long)pthread_self());
+                if (DEBUG) printf("[Component: %s, threadID: %lu] Processing control data...\n", comp->name, (unsigned long)pthread_self());
                 void* (*process_control)(Component*, void*) = comp->control_fn_pointer;
                 process_control(comp, (void*)control_data);
             } else {
