@@ -1,20 +1,23 @@
-main: main.c
-	# cc -std=c11 -fsanitize=address -o main main.c -lpthread -g -O0
-	cc -v -std=c11 -o main main.c -lpthread
+main: main.c cstream.h
+	cc -std=c11 -o main main.c -lpthread
 
-main-dbg: main.c
-	cc -std=c11 -fsanitize=address -o main main.c -lpthread -g -O0
+dbg: main.c
+	# cc -v
+	cc -std=c11 -Wall -Wextra -pedantic -fsanitize=address -o main main.c -lpthread -g -O0
+
+test: test.c cstream.h
+	cc -std=c11 -Wall -Wextra -pedantic -fsanitize=address -o test test.c -lpthread -g -O0
 
 compile_commands.json: Makefile
-	bear -- make main
+	bear -- make -B main
 
 run: main
 	./main
 
-dbg: main-dbg
-	./main
+run-test: test
+	./test
 
 clean:
-	rm -f main compile_commands.json
+	rm -f main compile_commands.json test
 
-.PHONY: run clean
+.PHONY: run clean main-dbg dbg
