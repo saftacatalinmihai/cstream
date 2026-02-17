@@ -11,7 +11,9 @@
 
 #define __CSTREAM_VERSION__ "0.0.4"
 
+#ifndef DEBUG
 #define DEBUG false
+#endif
 
 typedef int8_t  i8;
 typedef int16_t i16;
@@ -28,6 +30,8 @@ typedef u8 b8;
 #define MAX_PORTS 10
 #define MAX_FN_POINTERS 10
 
+// Arena can be used in main, but not in individual threads - it's not thread safe yet. 
+// It's meant to be used for storing components and ports, which are created before starting the threads.
 typedef struct Arena {
     char* memory;
     u64 size;
@@ -42,78 +46,52 @@ void    Arena_print_memory(Arena* arena);
 #define ARENA_ALLOC(arena, T) Arena_alloc(arena, sizeof(T))
 
 typedef struct ComponentPort ComponentPort;
-ComponentPort * Port_create(Arena *arena, u16 data_size);
-b8  Port_push(ComponentPort* port, void *data, u64 len);
-u64 Port_pull(ComponentPort* port, void *data, u64 len);
+ComponentPort* Port_create(Arena *arena, u16 data_size);
+b8             Port_push(ComponentPort* port, void *data, u64 len);
+u64            Port_pull(ComponentPort* port, void *data, u64 len);
 
 typedef struct Component Component;
-b8   Component_push_data   (Component* component, u8 port_idx, void* data, u64 len);
-void Component_push_control(Component* component,              void *data, u64 len);
+b8             Component_push_data   (Component* component, u8 port_idx, void* data, u64 len);
+void           Component_push_control(Component* component,              void *data, u64 len);
+void           Component_start       (Component* component);
+void*          Component_wait_end    (Component* component);
 
-void  Component_start(Component* component);
-void* Component_wait_end(Component* component);
+Component* Component_new        (char* name, Arena *arena,                                                                                   void *(*control_fn_pointer)(Component*, void*), u64 data_control_size, u32 parallelism_level, void* extra_data);
+Component* Component_Flow       (char* name, Arena *arena, void *(*data_fn_pointer)(Component*, void*), u64 data_in_size, u64 data_out_size, void *(*control_fn_pointer)(Component*, void*), u64 data_control_size, u32 parallelism_level, void* extra_data);
+Component* Component_Sink       (char* name, Arena *arena, void *(*data_fn_pointer)(Component*, void*), u64 data_in_size,                    void *(*control_fn_pointer)(Component*, void*), u64 data_control_size, u32 parallelism_level, void* extra_data);
+Component* Component_Source_tick(char* name, Arena *arena, void *(*data_fn_pointer)(Component*, void*),                   u64 data_out_size, void *(*control_fn_pointer)(Component*, void*), u64 data_control_size, int duration_us,       void* extra_data);
 
-Component* Component_new(
-    char* name,
-    Arena *arena,
-    void * (*control_fn_pointer)(Component*, void*),
-    u64 data_control_size,
-    u32 parallelism_level,
-    void* extra_data
-);
-Component* Component_Flow(
-    char* name,
-    Arena *arena,
-    void * (*data_fn_pointer)(Component*, void*),
-    u64 data_in_size,
-    u64 data_out_size,
-    void * (*control_fn_pointer)(Component*, void*),
-    u64 data_control_size,
-    u32 parallelism_level,
-    void* extra_data
-);
-Component* Component_Flow_Map(
-    Component *comp, 
-    u8 port_idx, 
-    void * (*data_fn_pointer)(Component*, void*)
-);
-Component* Component_Sink(
-    char* name,
-    Arena *arena,
-    void * (*data_fn_pointer)(Component*, void*),
-    u64 data_in_size,
-    void * (*control_fn_pointer)(Component*, void*),
-    u64 data_control_size,
-    u32 parallelism_level,
-    void* extra_data
-);
+Component* Component_Flow_Map(Component *comp, u8 port_idx, void *(*data_fn_pointer)(Component*, void*));
 
 #define COMP_FLOW(Tin, Tout, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
-    Component_Flow(name, arena, data_fn_pointer, sizeof(Tin), sizeof(Tout), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
+    Component_Flow(name, arena, (void *(*)(Component *, void *))data_fn_pointer, sizeof(Tin), sizeof(Tout), (void *(*)(Component *, void *))control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
 
 #define COMP_SINK(Tin, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
-    Component_Sink(name, arena, data_fn_pointer, sizeof(Tin), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
+    Component_Sink(name, arena, (void *(*)(Component *, void *))data_fn_pointer, sizeof(Tin), (void *(*)(Component *, void *))control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
 
 #endif // CSTREAM_H
 
-// #define CSTREAM_IMPLEMENTATION
+#define CSTREAM_IMPLEMENTATION
 #ifdef CSTREAM_IMPLEMENTATION
 Arena* Arena_create(u64 size) {
     Arena* arena = (Arena*)malloc(sizeof(Arena));
     arena->memory = (char*)calloc(size, 1);
-    /* arena->memory = malloc(size); */
     arena->size = size;
     arena->offset = 0;
     return arena;
 }
 
 void* Arena_alloc(Arena* arena, u64 size) {
-    if (arena->offset + size > arena->size) {
+    // Align offset to 16-byte boundary (required for pthread_mutex_t/pthread_cond_t on ARM64)
+    u64 alignment = 16;
+    u64 aligned_offset = (arena->offset + alignment - 1) & ~(alignment - 1);
+    
+    if (aligned_offset + size > arena->size) {
         return NULL;
     }
 
-    void* ptr = arena->memory + arena->offset;
-    arena->offset += size;
+    void* ptr = arena->memory + aligned_offset;
+    arena->offset = aligned_offset + size;
     return ptr;
 }
 
@@ -248,14 +226,20 @@ b8 Port_data_out_push(Component *comp, u8 port_idx, void* data, u64 len) {
     return Port_push(comp->data_out[port_idx], data, len);
 }
 
+void Component_push_control(Component* component, void *data, u64 len) {
+    for (u64 i = 0; i < component->parallelism_level; ++i) {
+        Port_push(component->control_in, data, len);
+    }
+}
+
 void* Component_run_thread(void* args);
 
 void Component_start(Component* component) {
-    printf("Starting component: %s with %d threads\n", component->name, component->parallelism_level);
+    if (DEBUG) printf("Starting component: %s with %d threads\n", component->name, component->parallelism_level);
     for (u32 i = 0; i < component->parallelism_level; ++i) {
         pthread_create(&component->threads[i], NULL, Component_run_thread, component);
     }
-    printf("Component %s started.\n", component->name);
+    if (DEBUG) printf("Component %s started.\n", component->name);
 }
 
 void* Component_wait_end(Component* component) {
@@ -271,8 +255,7 @@ Component* Component_new(
     void * (*control_fn_pointer)(Component*, void*),
     u64 data_control_size,
     u32 parallelism_level,
-    void* extra_data)
-{
+    void* extra_data) {
     Component *comp = (Component*)Arena_alloc(arena, sizeof(Component));
     comp->name = name;
     
@@ -341,16 +324,70 @@ Component* Component_Sink(
     return comp;
 }
 
-void Component_push_control(Component* component, void *data, u64 len) {
-    for (u64 i = 0; i < component->parallelism_level; ++i) {
-        Port_push(component->control_in, data, len);
+typedef struct TickData{
+    int duration_us;
+    Component *comp;
+} TickData;
+
+void* push_tick(void* args) {
+    TickData *td = (TickData*)args;
+    Component *comp = td->comp;
+
+    b8 tick = true;
+    while(true){
+        printf("Tick from component %s, threadID: %lu\n", comp->name, (unsigned long)pthread_self());
+        Port_push(comp->data_in[0], (void*)&tick, sizeof(b8));
+        usleep(td->duration_us);
     }
+    return NULL;
+}
+
+Component* Component_Source_tick(
+    char* name,
+    Arena *arena,
+    void * (*data_fn_pointer)(Component*, void*),
+    u64 data_out_size,
+    void * (*control_fn_pointer)(Component*, void*),
+    u64 data_control_size,
+    int duration_us,
+    void* extra_data
+) {
+    Component *comp = (Component*)Arena_alloc(arena, sizeof(Component));
+    comp->name = name;
+    
+    ComponentPort *control_port = Port_create(arena, data_control_size);
+    comp->control_in = control_port;
+    comp->control_size = data_control_size;
+    comp->control_fn_pointer = (void * (*)(Component*, void*))control_fn_pointer;
+
+    comp->data_in[0] = Port_create(arena, 1);
+    comp->data_in_size[0] = sizeof(b8);
+    comp->data_fn_pointer[0][0] = (void * (*)(Component*, void*))data_fn_pointer;
+
+    comp->data_out[0] = Port_create(arena, data_out_size);
+    comp->data_out_size[0] = data_out_size;
+
+    pthread_t* tick_thread = (pthread_t*)Arena_alloc(arena, sizeof(pthread_t));
+
+    TickData* td = (TickData*)Arena_alloc(arena, sizeof(TickData));
+    td->duration_us = duration_us;
+    td->comp = comp;
+;
+    pthread_create(tick_thread, NULL, push_tick, td);
+
+    comp->parallelism_level = 1;
+    comp->arena = arena; 
+    comp->threads = (pthread_t*)Arena_alloc(arena, sizeof(pthread_t));
+
+    comp->extra_data = extra_data;
+
+    return comp;
 }
 
 void* Component_run_thread(void* args) {
     Component *comp = (Component*)args;
     void* (**process_data)(Component*, void*) = comp->data_fn_pointer[0];
-    printf("[Component: %s, threadID: %lu] Started\n", comp->name, (unsigned long)pthread_self());
+    if (DEBUG) printf("[Component: %s, threadID: %lu] Started\n", comp->name, (unsigned long)pthread_self());
 
     /* char* control_data = Arena_alloc(comp->arena, comp->control_size); */
     char* control_data = (char*)malloc(comp->control_size);

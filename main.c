@@ -1,8 +1,9 @@
+/* #define DEBUG true */
+#define DEBUG false
+
 #define CSTREAM_IMPLEMENTATION
 #include "cstream.h"
 
-#define DEBUG false
-/* #define DEBUG true */
 
 typedef enum MsgType {
     MSG_TYPE_DATA = 0,
@@ -58,7 +59,8 @@ void* process_control(__attribute__((unused)) Component *comp, void* control_dat
 }
 
 #define NUM_COMPS 8
-#define NUM_DATA 1000042
+#define NUM_DATA 10042
+/* #define NUM_DATA 0 */
 int main(void) {
     Arena *arena = Arena_create(1024 * 1024 * 1024);
 
@@ -129,14 +131,15 @@ int main(void) {
         if (DEBUG) printf("Pushed %lld, %lu size\n", *(i64*)((Message*)(msg[i]).data), sizeof(Message*));
     }
 
-
     printf("Waiting for all data to be processed...\n");
     while (done_received < NUM_DATA) {
         u64 received = Port_pull(wait_port, (void*)&done, sizeof(b8));
-        if (DEBUG) printf("Wait received %llu bytes\n", received);
+        /* if (DEBUG) printf("Wait received %llu bytes\n", received); */
         if (received > 0) {
             done_received += received / sizeof(b8);
             if (DEBUG) printf("Received done signal. Total done: %u/%u\n", done_received, NUM_DATA);
+        } else {
+            usleep(1000); // Sleep for a short time to avoid busy waiting
         }
     }
 
