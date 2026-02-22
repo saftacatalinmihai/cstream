@@ -4,5 +4,6 @@ main
 main.dSYM/
 test
 test_plugin
+test_plugin_reload
 plugin_example.so
 _codeql_detected_source_root

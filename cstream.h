@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <stdatomic.h>
 
 #define __CSTREAM_VERSION__ "0.0.4"
 
@@ -78,6 +80,21 @@ void    Plugin_unload    (Plugin* plugin);
 // Convention: every plugin shared library must export this symbol.
 // It returns a new Component* allocated from the provided arena.
 typedef Component* (*PluginComponentFactory)(Arena* arena);
+
+// PluginWatcher — monitors a source file for changes and automatically
+// recompiles + hot-reloads the plugin, updating the live component's
+// function pointers so new data is processed by the new code.
+// Note: the function-pointer update is not protected by a mutex (bare minimum).
+typedef struct PluginWatcher PluginWatcher;
+
+PluginWatcher* Plugin_watch_start(Plugin**    plugin_ref,
+                                  Component*  component,
+                                  Arena*      arena,
+                                  const char* source_file,
+                                  const char* compile_cmd,
+                                  const char* factory_symbol);
+void Plugin_watch_stop        (PluginWatcher* watcher);
+int  Plugin_watch_reload_count(PluginWatcher* watcher);
 
 #define COMP_FLOW(Tin, Tout, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
     Component_Flow(name, arena, (void *(*)(Component *, void *))data_fn_pointer, sizeof(Tin), sizeof(Tout), (void *(*)(Component *, void *))control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
@@ -504,6 +521,128 @@ void Plugin_unload(Plugin* plugin) {
     dlclose(plugin->handle);
     free(plugin->path);
     free(plugin);
+}
+
+struct PluginWatcher {
+    Plugin**      plugin_ref;
+    Component*    component;
+    Arena*        arena;
+    char*         source_file;
+    char*         compile_cmd;
+    char*         factory_symbol;
+    pthread_t     thread;
+    _Atomic int   running;
+    _Atomic int   reload_count;
+};
+
+static void* plugin_watcher_thread(void* arg) {
+    PluginWatcher* w = (PluginWatcher*)arg;
+    struct stat st;
+    // Use full nanosecond resolution to detect rapid changes within the same second.
+    long last_mtime_sec  = 0;
+    long last_mtime_nsec = 0;
+
+    if (stat(w->source_file, &st) == 0) {
+        last_mtime_sec  = (long)st.st_mtim.tv_sec;
+        last_mtime_nsec = (long)st.st_mtim.tv_nsec;
+    }
+
+    while (atomic_load(&w->running)) {
+        usleep(500000); // poll every 500 ms
+
+        if (stat(w->source_file, &st) != 0) continue;
+        if ((long)st.st_mtim.tv_sec  == last_mtime_sec &&
+            (long)st.st_mtim.tv_nsec == last_mtime_nsec) continue;
+
+        last_mtime_sec  = (long)st.st_mtim.tv_sec;
+        last_mtime_nsec = (long)st.st_mtim.tv_nsec;
+        printf("[PluginWatcher] Change detected in %s, recompiling...\n", w->source_file);
+
+        if (system(w->compile_cmd) != 0) {
+            fprintf(stderr, "[PluginWatcher] Recompile failed.\n");
+            continue;
+        }
+
+        // Save the .so path, close old handle, open fresh copy.
+        char* so_path = strdup((*w->plugin_ref)->path);
+        if (!so_path) continue;
+        Plugin_unload(*w->plugin_ref);
+        *w->plugin_ref = NULL;
+
+        Plugin* new_plugin = Plugin_load(so_path);
+        free(so_path);
+        if (!new_plugin) continue;
+
+        void* sym = Plugin_get_symbol(new_plugin, w->factory_symbol);
+        if (!sym) { Plugin_unload(new_plugin); continue; }
+
+        PluginComponentFactory factory;
+        memcpy(&factory, &sym, sizeof(factory));
+
+        // Create a temporary component to extract the new function pointers.
+        Component* tmp = factory(w->arena);
+
+        // Update the live component's function pointers (bare minimum, no mutex).
+        for (int p = 0; p < MAX_PORTS; p++) {
+            for (int f = 0; f < MAX_FN_POINTERS; f++) {
+                w->component->data_fn_pointer[p][f] = tmp->data_fn_pointer[p][f];
+            }
+        }
+        w->component->control_fn_pointer = tmp->control_fn_pointer;
+
+        *w->plugin_ref = new_plugin;
+        atomic_fetch_add(&w->reload_count, 1);
+        printf("[PluginWatcher] Reloaded successfully.\n");
+    }
+    return NULL;
+}
+
+PluginWatcher* Plugin_watch_start(Plugin**    plugin_ref,
+                                  Component*  component,
+                                  Arena*      arena,
+                                  const char* source_file,
+                                  const char* compile_cmd,
+                                  const char* factory_symbol) {
+    PluginWatcher* w = (PluginWatcher*)malloc(sizeof(PluginWatcher));
+    if (!w) return NULL;
+    w->plugin_ref     = plugin_ref;
+    w->component      = component;
+    w->arena          = arena;
+    w->source_file    = strdup(source_file);
+    w->compile_cmd    = strdup(compile_cmd);
+    w->factory_symbol = strdup(factory_symbol);
+    w->running        = 1;
+    w->reload_count   = 0;
+    if (!w->source_file || !w->compile_cmd || !w->factory_symbol) {
+        free(w->source_file);
+        free(w->compile_cmd);
+        free(w->factory_symbol);
+        free(w);
+        return NULL;
+    }
+    if (pthread_create(&w->thread, NULL, plugin_watcher_thread, w) != 0) {
+        free(w->source_file);
+        free(w->compile_cmd);
+        free(w->factory_symbol);
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+void Plugin_watch_stop(PluginWatcher* watcher) {
+    if (!watcher) return;
+    atomic_store(&watcher->running, 0);
+    pthread_join(watcher->thread, NULL);
+    free(watcher->source_file);
+    free(watcher->compile_cmd);
+    free(watcher->factory_symbol);
+    free(watcher);
+}
+
+int Plugin_watch_reload_count(PluginWatcher* watcher) {
+    if (!watcher) return 0;
+    return atomic_load(&watcher->reload_count);
 }
 
 #endif // CSTREAM_IMPLEMENTATION
