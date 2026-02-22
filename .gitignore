@@ -2,3 +2,7 @@ compile_commands.json
 main
 .cache/
 main.dSYM/
+test
+test_plugin
+plugin_example.so
+_codeql_detected_source_root
