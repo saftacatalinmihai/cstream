@@ -4,10 +4,12 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #define __CSTREAM_VERSION__ "0.0.4"
 
@@ -62,6 +64,20 @@ Component* Component_Sink       (char* name, Arena *arena, void *(*data_fn_point
 Component* Component_Source_tick(char* name, Arena *arena, void *(*data_fn_pointer)(Component*, void*),                   u64 data_out_size, void *(*control_fn_pointer)(Component*, void*), u64 data_control_size, int duration_us,       void* extra_data);
 
 Component* Component_Flow_Map(Component *comp, u8 port_idx, void *(*data_fn_pointer)(Component*, void*));
+
+// Plugin API — load shared-library components at runtime via dlopen
+typedef struct Plugin {
+    void* handle;
+    char* path;
+} Plugin;
+
+Plugin* Plugin_load      (const char* path);
+void*   Plugin_get_symbol(Plugin* plugin, const char* symbol);
+void    Plugin_unload    (Plugin* plugin);
+
+// Convention: every plugin shared library must export this symbol.
+// It returns a new Component* allocated from the provided arena.
+typedef Component* (*PluginComponentFactory)(Arena* arena);
 
 #define COMP_FLOW(Tin, Tout, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
     Component_Flow(name, arena, (void *(*)(Component *, void *))data_fn_pointer, sizeof(Tin), sizeof(Tout), (void *(*)(Component *, void *))control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
@@ -448,6 +464,46 @@ void* Component_run_thread(void* args) {
         }
     }
     return NULL;
+}
+
+Plugin* Plugin_load(const char* path) {
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        fprintf(stderr, "Plugin_load: %s\n", dlerror());
+        return NULL;
+    }
+    Plugin* plugin = (Plugin*)malloc(sizeof(Plugin));
+    if (!plugin) {
+        dlclose(handle);
+        return NULL;
+    }
+    plugin->handle = handle;
+    plugin->path   = strdup(path);
+    if (!plugin->path) {
+        dlclose(handle);
+        free(plugin);
+        return NULL;
+    }
+    return plugin;
+}
+
+void* Plugin_get_symbol(Plugin* plugin, const char* symbol) {
+    if (!plugin || !plugin->handle) return NULL;
+    dlerror(); // clear previous error
+    void* sym = dlsym(plugin->handle, symbol);
+    char* err = dlerror();
+    if (err) {
+        fprintf(stderr, "Plugin_get_symbol '%s': %s\n", symbol, err);
+        return NULL;
+    }
+    return sym;
+}
+
+void Plugin_unload(Plugin* plugin) {
+    if (!plugin) return;
+    dlclose(plugin->handle);
+    free(plugin->path);
+    free(plugin);
 }
 
 #endif // CSTREAM_IMPLEMENTATION

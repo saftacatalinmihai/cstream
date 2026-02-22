@@ -8,6 +8,12 @@ dbg: main.c
 test: test.c cstream.h
 	cc -std=c11 -Wall -Wextra -pedantic -fsanitize=address -o test test.c -lpthread -g -O0
 
+plugin_example.so: plugin_example.c cstream.h
+	cc -std=c11 -Wall -Wextra -pedantic -shared -fPIC -o plugin_example.so plugin_example.c -lpthread
+
+test_plugin: test_plugin.c cstream.h plugin_example.so
+	cc -std=c11 -Wall -Wextra -pedantic -fsanitize=address -o test_plugin test_plugin.c -lpthread -ldl -g -O0
+
 compile_commands.json: Makefile
 	bear -- make -B main
 
@@ -17,7 +23,10 @@ run: main
 run-test: test
 	./test
 
+run-test-plugin: test_plugin
+	./test_plugin
+
 clean:
-	rm -f main compile_commands.json test
+	rm -f main compile_commands.json test test_plugin plugin_example.so
 
 .PHONY: run clean main-dbg dbg
