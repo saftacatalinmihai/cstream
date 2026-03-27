@@ -85,7 +85,7 @@ typedef struct ComponentPort { // A ring buffer for data
 
 ComponentPort * Port_create(Arena *arena, u16 data_size) {
     ComponentPort *port = Arena_alloc(arena, sizeof(ComponentPort));
-    port->max = data_size * 4;
+    port->max = data_size * 16;
     port->buffer = Arena_alloc(arena, data_size * port->max);
     port->mutex = (pthread_mutex_t*) Arena_alloc(arena,sizeof(pthread_mutex_t));
     pthread_mutex_init(port->mutex, NULL);
@@ -238,7 +238,7 @@ void* process_i64(Component *comp, Message** message) {
     if ((i64)msg->data == -1) {
         printf("-1\n");
     }
-    /* usleep(100); */
+    usleep(100);
      if (debug) printf("[Component: %s, threadID: %lu] Got Value: %lld\n", comp->name, (unsigned long)pthread_self(), *(i64*)(msg->data));
 
     i64 new_value = *(i64*)(msg->data) + 1000;
@@ -266,12 +266,72 @@ void* process_control(Component *comp, void* control_data) {
     return NULL;
 }
 
-#define NUM_COMPS 4
+#define NUM_COMPS 8
 #define NUM_DATA 1000042
+
+typedef struct DomainMessage {
+    i64 i1;
+    i64 i2;
+    b8 b1;
+    char str1[32];
+} DomainMessage;
+
+void* process_domain_message(Component *comp, Message* msg) {
+    DomainMessage *dm = msg->data;
+    dm->i2 = dm->i1 + 1000;
+
+    printf("Domain Message processed: i1=%lld, i2=%lld\n", dm->i1, dm->i2);
+    return (void*)true;
+    /* b8* ret = malloc(sizeof(b8)); */
+    /* return (void*)ret; */
+}
 
 int main () {
     Arena *arena = Arena_create(1024 * 1024 * 1024);
 
+    // New
+    Component *c1 = COMP_FLOW(Message, b8, b8, "CD1", arena,
+        (void *)process_domain_message,
+        (void *)process_control,
+        4,
+        NULL);
+    Component_start(c1);
+
+    DomainMessage dm1 = {0};
+    dm1.i1 = 42;
+    Message m1 = {0};
+    m1.msgType = MSG_TYPE_DATA;
+    m1.data = &dm1;
+    Port_push(c1->data_in[0], &m1, sizeof(Message));
+
+    DomainMessage dm2 = {0};
+    dm2.i1 = 1042;
+    Message m2 = {0};
+    m2.msgType = MSG_TYPE_DATA;
+    m2.data = &dm2;
+    Port_push(c1->data_in[0], &m2, sizeof(Message));
+
+    DomainMessage dm3 = {0};
+    dm3.i1 = 1044;
+    Message m3 = {0};
+    m3.msgType = MSG_TYPE_DATA;
+    m3.data = &dm3;
+    Port_push(c1->data_in[0], &m3, sizeof(Message));
+
+    int i = 0;
+    while(i < 3) {
+        b8 ret;
+        u64 out_bytes = Port_pull(c1->data_out[0], &ret, sizeof(b8));
+        if (out_bytes > 0) {
+            printf("Done\n");
+            i++;
+        } else {
+            sleep(1);
+        }
+    }
+    return 0;
+
+    // Prev
     struct timespec start, t1, t2, t3, end;
 
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -316,7 +376,7 @@ int main () {
     Message msg[NUM_DATA] = {0};
     i64 data[NUM_DATA] = {0};
 
-    printf("Pushing data...\n");
+    printf("Pushing data: Bytes: %lu\n", NUM_DATA * sizeof(Message));
     u32 done_received = 0;
     b8 done = false;
 
@@ -522,7 +582,10 @@ void* Component_run_thread(void* args) {
             /* for( u64 i = 0; i <= ceil((len / comp->data_in_size[0]) / comp->parallelism_level); ++i) { */
             for( u64 i = 0; i < len / comp->data_in_size[0]; ++i) {
                 if (debug) printf("[Component: %s, threadID: %lu] Processing idx %lld\n", comp->name, (unsigned long)pthread_self(), i);
-                process_data(comp, data + (i * comp->data_in_size[0]));
+                void* ret = process_data(comp, data + (i * comp->data_in_size[0]));
+                if (ret != NULL) {
+                    Port_data_out_push(comp, 0, &ret, comp->data_out_size[0]);
+                }
             }
         }
         else {
