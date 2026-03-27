@@ -1,14 +1,17 @@
-#pragma once
+#ifndef CSTREAM_H
+#define CSTREAM_H
+
 #define _GNU_SOURCE
-#include <assert.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <time.h>
 #include <string.h>
+
+#define __CSTREAM_VERSION__ "0.0.4"
+
+#define DEBUG false
 
 typedef int8_t  i8;
 typedef int16_t i16;
@@ -25,21 +28,76 @@ typedef u8 b8;
 #define MAX_PORTS 10
 #define MAX_FN_POINTERS 10
 
-#define DEBUG false
-/* #define DEBUG true */
-
 typedef struct Arena {
     char* memory;
     u64 size;
     u64 offset;
 } Arena;
+Arena*  Arena_create(u64 size);
+void*   Arena_alloc(Arena* arena, u64 size);
+void    Arena_reset(Arena* arena);
+void    Arena_destroy(Arena* arena);
+void    Arena_print_memory(Arena* arena);
 
-void* Arena_alloc_with_type(Arena* arena, u64 size, char* custom_name);
+#define ARENA_ALLOC(arena, T) Arena_alloc(arena, sizeof(T))
 
-#define ARENA_ALLOC(arena, T) Arena_alloc_with_type(arena, sizeof(T), TYPE_##T, #T)
-#define ARENA_ALLOC_NAMED(arena, T, name) Arena_alloc_with_type(arena, sizeof(T), TYPE_##T, name)
-#define __VER__ 4
+typedef struct ComponentPort ComponentPort;
+ComponentPort * Port_create(Arena *arena, u16 data_size);
+b8  Port_push(ComponentPort* port, void *data, u64 len);
+u64 Port_pull(ComponentPort* port, void *data, u64 len);
 
+typedef struct Component Component;
+b8   Component_push_data   (Component* component, u8 port_idx, void* data, u64 len);
+void Component_push_control(Component* component,              void *data, u64 len);
+
+void  Component_start(Component* component);
+void* Component_wait_end(Component* component);
+
+Component* Component_new(
+    char* name,
+    Arena *arena,
+    void * (*control_fn_pointer)(Component*, void*),
+    u64 data_control_size,
+    u32 parallelism_level,
+    void* extra_data
+);
+Component* Component_Flow(
+    char* name,
+    Arena *arena,
+    void * (*data_fn_pointer)(Component*, void*),
+    u64 data_in_size,
+    u64 data_out_size,
+    void * (*control_fn_pointer)(Component*, void*),
+    u64 data_control_size,
+    u32 parallelism_level,
+    void* extra_data
+);
+Component* Component_Flow_Map(
+    Component *comp, 
+    u8 port_idx, 
+    void * (*data_fn_pointer)(Component*, void*)
+);
+Component* Component_Sink(
+    char* name,
+    Arena *arena,
+    void * (*data_fn_pointer)(Component*, void*),
+    u64 data_in_size,
+    void * (*control_fn_pointer)(Component*, void*),
+    u64 data_control_size,
+    u32 parallelism_level,
+    void* extra_data
+);
+
+#define COMP_FLOW(Tin, Tout, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
+    Component_Flow(name, arena, data_fn_pointer, sizeof(Tin), sizeof(Tout), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
+
+#define COMP_SINK(Tin, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
+    Component_Sink(name, arena, data_fn_pointer, sizeof(Tin), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
+
+#endif // CSTREAM_H
+
+// #define CSTREAM_IMPLEMENTATION
+#ifdef CSTREAM_IMPLEMENTATION
 Arena* Arena_create(u64 size) {
     Arena* arena = (Arena*)malloc(sizeof(Arena));
     arena->memory = (char*)calloc(size, 1);
@@ -50,10 +108,6 @@ Arena* Arena_create(u64 size) {
 }
 
 void* Arena_alloc(Arena* arena, u64 size) {
-    return Arena_alloc_with_type(arena, size, NULL);
-}
-
-void* Arena_alloc_with_type(Arena* arena, u64 size, char* custom_name) {
     if (arena->offset + size > arena->size) {
         return NULL;
     }
@@ -79,7 +133,7 @@ void Arena_print_memory(Arena* arena) {
     printf("\n");
 }
 
-typedef struct ComponentPort { // A ring buffer for data
+struct ComponentPort { // A ring buffer for data
     char* buffer;
     u64 head;
     u64 tail;
@@ -88,7 +142,7 @@ typedef struct ComponentPort { // A ring buffer for data
     pthread_mutex_t *mutex;
     pthread_cond_t *cond_not_full;
     pthread_cond_t *cond_not_empty;
-} ComponentPort;
+};
 
 ComponentPort * Port_create(Arena *arena, u16 data_size) {
     ComponentPort *port = (ComponentPort*)Arena_alloc(arena, sizeof(ComponentPort));
@@ -171,7 +225,6 @@ u64 Port_pull(ComponentPort* port, void *data, u64 len) {
     return to_read;
 }
 
-typedef struct Component Component;
 struct Component {
     char* name;
     ComponentPort *data_in[MAX_PORTS];
@@ -195,24 +248,18 @@ b8 Port_data_out_push(Component *comp, u8 port_idx, void* data, u64 len) {
     return Port_push(comp->data_out[port_idx], data, len);
 }
 
-
-
-b8 Port_data_out_push(Component *comp, u8 port_idx, void* data, u64 len);
-b8 Port_push(ComponentPort* rb, void *data, u64 len);
-u64 Port_pull(ComponentPort* rb, void *data, u64 len);
-
 void* Component_run_thread(void* args);
 
 void Component_start(Component* component) {
     printf("Starting component: %s with %d threads\n", component->name, component->parallelism_level);
-    for (int i = 0; i < component->parallelism_level; ++i) {
+    for (u32 i = 0; i < component->parallelism_level; ++i) {
         pthread_create(&component->threads[i], NULL, Component_run_thread, component);
     }
     printf("Component %s started.\n", component->name);
 }
 
 void* Component_wait_end(Component* component) {
-    for (int i = 0; i < component->parallelism_level; ++i) {
+    for (u32 i = 0; i < component->parallelism_level; ++i) {
         pthread_join(component->threads[i], NULL);
     }
     return NULL;
@@ -224,8 +271,8 @@ Component* Component_new(
     void * (*control_fn_pointer)(Component*, void*),
     u64 data_control_size,
     u32 parallelism_level,
-    void* extra_data
-) {
+    void* extra_data)
+{
     Component *comp = (Component*)Arena_alloc(arena, sizeof(Component));
     comp->name = name;
     
@@ -294,13 +341,6 @@ Component* Component_Sink(
     return comp;
 }
 
-#define COMP_FLOW(Tin, Tout, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
-    Component_Flow(name, arena, data_fn_pointer, sizeof(Tin), sizeof(Tout), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
-
-#define COMP_SINK(Tin, Tcontrol, name, arena, data_fn_pointer, control_fn_pointer, parallelism_level, extra_data) \
-    Component_Sink(name, arena, data_fn_pointer, sizeof(Tin), control_fn_pointer, sizeof(Tcontrol), parallelism_level, extra_data)
-
-
 void Component_push_control(Component* component, void *data, u64 len) {
     for (u64 i = 0; i < component->parallelism_level; ++i) {
         Port_push(component->control_in, data, len);
@@ -349,17 +389,18 @@ void* Component_run_thread(void* args) {
                 process_control(comp, (void*)control_data);
             } else {
                 struct timespec ts;
-                int rc = 0;
+                // int rc = 0;
                 clock_gettime(CLOCK_REALTIME, &ts);
                 /* ts.tv_sec += 1; */
                 ts.tv_nsec += 100000000; // 100 ms
 
                 pthread_mutex_lock(comp->data_in[0]->mutex);
                 b8 data_buffer_empty = (comp->data_in[0]->head == comp->data_in[0]->tail) && !comp->data_in[0]->full;
-                b8 control_buffer_empty = (comp->control_in->head == comp->control_in->tail) && !comp->control_in->full;
+                // b8 control_buffer_empty = (comp->control_in->head == comp->control_in->tail) && !comp->control_in->full;
                 if (data_buffer_empty) {
                     /* pthread_cond_wait(comp->data_in[0]->cond_empty, comp->data_in[0]->mutex); */
-                    rc = pthread_cond_timedwait(comp->data_in[0]->cond_not_empty, comp->data_in[0]->mutex, &ts);
+                    pthread_cond_timedwait(comp->data_in[0]->cond_not_empty, comp->data_in[0]->mutex, &ts);
+                    // rc = pthread_cond_timedwait(comp->data_in[0]->cond_not_empty, comp->data_in[0]->mutex, &ts);
                 }
                 pthread_mutex_unlock(comp->data_in[0]->mutex);
 
@@ -371,3 +412,5 @@ void* Component_run_thread(void* args) {
     }
     return NULL;
 }
+
+#endif // CSTREAM_IMPLEMENTATION
